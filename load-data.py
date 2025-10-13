@@ -7,6 +7,11 @@ import uuid
 
 # Database connection parameters (hidden from AI)
 DB_CONFIG = {
+    'host': 'goaled-test.cby80ecou4gk.ap-east-1.rds.amazonaws.com',
+    'database': 'goaled',
+    'user': 'postgres',
+    'password': 'JmSvheVQHRDjvSbWj2sO',
+    'port': 5432
 }
 
 def load_data_from_file():
