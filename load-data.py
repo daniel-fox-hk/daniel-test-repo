@@ -3,14 +3,10 @@ import psycopg2
 from psycopg2 import sql
 from datetime import datetime
 import os
+import uuid
 
 # Database connection parameters (hidden from AI)
 DB_CONFIG = {
-    'host': 'goaled-test.cby80ecou4gk.ap-east-1.rds.amazonaws.com',
-    'database': 'goaled',
-    'user': 'postgres',
-    'password': 'JmSvheVQHRDjvSbWj2sO',
-    'port': 5432
 }
 
 def load_data_from_file():
@@ -35,10 +31,11 @@ def load_data_from_file():
         return []
 
 
-def map_json_to_db(school_json):
+def map_json_to_db(school_json, generated_id):
     """Map JSON fields to database columns"""
     return {
-        'school_id': str(school_json.get('school_id', '')),
+        'school_id': generated_id,  # Use generated unique ID
+        'original_school_id': str(school_json.get('school_id', '')),  # Keep original for reference
         'addr1': school_json.get('addr_eng', '') or '',
         'addr2': None,
         'admission_info': school_json.get('admission_info_eng', '') or '',
@@ -98,6 +95,35 @@ def map_json_to_db(school_json):
         'type_eng': school_json.get('type_eng')
     }
 
+def check_duplicates(schools_data):
+    """Check for duplicate school_ids in the JSON data"""
+    school_ids = [str(school.get('school_id', '')) for school in schools_data]
+    unique_ids = set(school_ids)
+    
+    if len(school_ids) != len(unique_ids):
+        print(f"\n⚠ WARNING: Found duplicate school_ids in JSON!")
+        print(f"Total records: {len(school_ids)}")
+        print(f"Unique school_ids: {len(unique_ids)}")
+        print(f"Duplicates: {len(school_ids) - len(unique_ids)}")
+        
+        # Find and display duplicates
+        from collections import Counter
+        id_counts = Counter(school_ids)
+        duplicates = {id_: count for id_, count in id_counts.items() if count > 1}
+        
+        print(f"\nDuplicate school_ids found:")
+        for school_id, count in sorted(duplicates.items()):
+            print(f"  school_id: {school_id} appears {count} times")
+            # Show names of duplicate schools
+            duplicate_schools = [s for s in schools_data if str(s.get('school_id', '')) == school_id]
+            for idx, school in enumerate(duplicate_schools, 1):
+                print(f"    [{idx}] {school.get('name_eng', 'N/A')}")
+        
+        return duplicates
+    else:
+        print(f"✓ No duplicate school_ids found")
+        return {}
+
 def insert_school(conn, school_data):
     """Insert a single school record"""
     cursor = conn.cursor()
@@ -132,10 +158,6 @@ def insert_school(conn, school_data):
             %(school_info_eng)s, %(superintendent)s, %(superintendent_name_cht)s,
             %(superintendent_name_eng)s, %(type_cht)s, %(type_eng)s
         )
-        ON CONFLICT (school_id) DO UPDATE SET
-            addr1 = EXCLUDED.addr1,
-            name = EXCLUDED.name,
-            updated = EXCLUDED.updated
     """
     
     try:
@@ -148,24 +170,6 @@ def insert_school(conn, school_data):
     finally:
         cursor.close()
 
-def verify_missing_records(conn, schools_data):
-    """Check which school_ids from JSON are missing in the database"""
-    cursor = conn.cursor()
-    
-    # Get all school_ids from JSON
-    json_school_ids = set(str(school.get('school_id', '')) for school in schools_data)
-    
-    # Get all school_ids from database
-    cursor.execute("SELECT school_id FROM school")
-    db_school_ids = set(row[0] for row in cursor.fetchall())
-    
-    # Find missing school_ids
-    missing_ids = json_school_ids - db_school_ids
-    
-    cursor.close()
-    
-    return missing_ids, len(json_school_ids), len(db_school_ids)
-
 def main():
     """Main execution function"""
     # Load data from JSON file
@@ -175,81 +179,79 @@ def main():
         print("No data to process. Exiting.")
         return
     
+    # Check for duplicates before processing
+    print("\nChecking for duplicate school_ids...")
+    duplicates = check_duplicates(schools_data)
+    
     try:
         # Connect to database
         conn = psycopg2.connect(**DB_CONFIG)
-        print("Connected to database successfully")
+        print("\nConnected to database successfully")
         
         success_count = 0
         error_count = 0
         failed_records = []
+        id_mapping = []  # Store mapping of original to generated IDs
         
         # Process each school record
-        for school_json in schools_data:
-            school_data = map_json_to_db(school_json)
+        for idx, school_json in enumerate(schools_data, 1):
+            # Generate unique ID using UUID or sequential ID
+            generated_id = str(uuid.uuid4())  # or use f"school_{idx:06d}" for sequential IDs
+            
+            school_data = map_json_to_db(school_json, generated_id)
             success, error_msg = insert_school(conn, school_data)
             
             if success:
                 success_count += 1
-                print(f"✓ Inserted school_id: {school_data['school_id']}")
+                original_id = school_data['original_school_id']
+                id_mapping.append({
+                    'original_school_id': original_id,
+                    'new_school_id': generated_id,
+                    'name': school_data.get('name', 'N/A')
+                })
+                print(f"✓ [{idx}/{len(schools_data)}] Inserted: {school_data.get('name', 'N/A')} (original_id: {original_id} → new_id: {generated_id})")
             else:
                 error_count += 1
                 failed_records.append({
-                    'school_id': school_data['school_id'],
+                    'original_school_id': school_data['original_school_id'],
+                    'generated_id': generated_id,
                     'name': school_data.get('name', 'N/A'),
                     'error': error_msg
                 })
-                print(f"✗ Failed school_id: {school_data['school_id']} - {error_msg}")
+                print(f"✗ [{idx}/{len(schools_data)}] Failed: {school_data.get('name', 'N/A')} - {error_msg}")
         
         print(f"\n{'='*70}")
-        print(f"Insert complete: {success_count} successful, {error_count} errors")
+        print(f"INSERT COMPLETE")
+        print(f"{'='*70}")
+        print(f"Total records processed: {len(schools_data)}")
+        print(f"Successfully inserted:   {success_count}")
+        print(f"Failed insertions:       {error_count}")
         print(f"{'='*70}")
         
-        # Verify which records are missing
-        print("\nVerifying database records...")
-        missing_ids, json_count, db_count = verify_missing_records(conn, schools_data)
+        # Verify database count
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM school")
+        db_count = cursor.fetchone()[0]
+        cursor.close()
         
-        print(f"\n{'='*70}")
-        print(f"VERIFICATION RESULTS:")
-        print(f"{'='*70}")
-        print(f"Records in JSON file: {json_count}")
-        print(f"Records in database:  {db_count}")
-        print(f"Missing records:      {len(missing_ids)}")
-        print(f"{'='*70}")
+        print(f"\n✓ Database now contains {db_count} records")
         
-        if missing_ids:
-            print(f"\n⚠ WARNING: {len(missing_ids)} records are missing from the database!")
-            print("\nMissing school_ids:")
-            
-            # Create detailed report of missing records
-            for school_json in schools_data:
-                school_id = str(school_json.get('school_id', ''))
-                if school_id in missing_ids:
-                    name = school_json.get('name_eng', 'N/A')
-                    print(f"  - school_id: {school_id}, name: {name}")
-            
-            # Save missing records to a file
+        # Save ID mapping to file
+        if id_mapping:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            missing_file = os.path.join(script_dir, 'missing_records.json')
+            mapping_file = os.path.join(script_dir, 'id_mapping.json')
             
-            missing_records_data = [
-                school for school in schools_data 
-                if str(school.get('school_id', '')) in missing_ids
-            ]
+            with open(mapping_file, 'w', encoding='utf-8') as f:
+                json.dump(id_mapping, f, indent=2, ensure_ascii=False)
             
-            with open(missing_file, 'w', encoding='utf-8') as f:
-                json.dump(missing_records_data, f, indent=2, ensure_ascii=False)
-            
-            print(f"\n✓ Missing records saved to: {missing_file}")
-        else:
-            print("\n✓ All records successfully imported!")
+            print(f"✓ ID mapping saved to: {mapping_file}")
         
         if failed_records:
             print(f"\n{'='*70}")
             print(f"FAILED INSERTIONS SUMMARY:")
             print(f"{'='*70}")
             for record in failed_records:
-                print(f"school_id: {record['school_id']}")
+                print(f"Original ID: {record['original_school_id']}")
                 print(f"  name: {record['name']}")
                 print(f"  error: {record['error']}\n")
         
