@@ -3,7 +3,6 @@ import psycopg2
 from psycopg2 import sql
 from datetime import datetime
 import os
-import uuid
 
 # Database connection parameters (hidden from AI)
 DB_CONFIG = {
@@ -36,10 +35,35 @@ def load_data_from_file():
         return []
 
 
+def get_next_school_id(conn):
+    """Get the next available school_id by finding the max numeric ID in database"""
+    cursor = conn.cursor()
+    try:
+        # Try to find the highest numeric school_id
+        cursor.execute("""
+            SELECT school_id FROM school 
+            WHERE school_id ~ '^[0-9]+$'
+            ORDER BY CAST(school_id AS BIGINT) DESC 
+            LIMIT 1
+        """)
+        result = cursor.fetchone()
+        if result:
+            max_id = int(result[0])
+            return max_id + 1
+        else:
+            # Start from 10000000000 if no numeric IDs exist
+            return 10000000000
+    except Exception as e:
+        print(f"Warning: Could not determine max ID, starting from 10000000000: {e}")
+        return 10000000000
+    finally:
+        cursor.close()
+
+
 def map_json_to_db(school_json, generated_id):
     """Map JSON fields to database columns"""
     return {
-        'school_id': generated_id,  # Use generated unique ID
+        'school_id': generated_id,  # Use generated unique ID (11 digits)
         'original_school_id': str(school_json.get('school_id', '')),  # Keep original for reference
         'addr1': school_json.get('addr_eng', '') or '',
         'addr2': None,
@@ -193,6 +217,10 @@ def main():
         conn = psycopg2.connect(**DB_CONFIG)
         print("\nConnected to database successfully")
         
+        # Get the starting ID
+        current_id = get_next_school_id(conn)
+        print(f"Starting ID generation from: {current_id}")
+        
         success_count = 0
         error_count = 0
         failed_records = []
@@ -200,8 +228,8 @@ def main():
         
         # Process each school record
         for idx, school_json in enumerate(schools_data, 1):
-            # Generate unique ID using UUID or sequential ID
-            generated_id = str(uuid.uuid4())  # or use f"school_{idx:06d}" for sequential IDs
+            # Generate 11-digit ID
+            generated_id = str(current_id).zfill(11)  # Pad with zeros to ensure 11 digits
             
             school_data = map_json_to_db(school_json, generated_id)
             success, error_msg = insert_school(conn, school_data)
@@ -214,7 +242,8 @@ def main():
                     'new_school_id': generated_id,
                     'name': school_data.get('name', 'N/A')
                 })
-                print(f"✓ [{idx}/{len(schools_data)}] Inserted: {school_data.get('name', 'N/A')} (original_id: {original_id} → new_id: {generated_id})")
+                print(f"✓ [{idx}/{len(schools_data)}] Inserted: {school_data.get('name', 'N/A')[:50]} (original_id: {original_id} → new_id: {generated_id})")
+                current_id += 1  # Increment for next record
             else:
                 error_count += 1
                 failed_records.append({
@@ -223,7 +252,7 @@ def main():
                     'name': school_data.get('name', 'N/A'),
                     'error': error_msg
                 })
-                print(f"✗ [{idx}/{len(schools_data)}] Failed: {school_data.get('name', 'N/A')} - {error_msg}")
+                print(f"✗ [{idx}/{len(schools_data)}] Failed: {school_data.get('name', 'N/A')[:50]} - {error_msg}")
         
         print(f"\n{'='*70}")
         print(f"INSERT COMPLETE")
