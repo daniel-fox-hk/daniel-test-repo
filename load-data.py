@@ -4,7 +4,7 @@ from psycopg2 import sql
 from datetime import datetime
 import os
 
-# Database connection parameters
+# Database connection parameters (hidden from AI)
 DB_CONFIG = {
     'host': 'goaled-test.cby80ecou4gk.ap-east-1.rds.amazonaws.com',
     'database': 'goaled',
@@ -141,13 +141,30 @@ def insert_school(conn, school_data):
     try:
         cursor.execute(insert_query, school_data)
         conn.commit()
-        return True
+        return True, None
     except Exception as e:
         conn.rollback()
-        print(f"Error inserting school_id {school_data['school_id']}: {e}")
-        return False
+        return False, str(e)
     finally:
         cursor.close()
+
+def verify_missing_records(conn, schools_data):
+    """Check which school_ids from JSON are missing in the database"""
+    cursor = conn.cursor()
+    
+    # Get all school_ids from JSON
+    json_school_ids = set(str(school.get('school_id', '')) for school in schools_data)
+    
+    # Get all school_ids from database
+    cursor.execute("SELECT school_id FROM school")
+    db_school_ids = set(row[0] for row in cursor.fetchall())
+    
+    # Find missing school_ids
+    missing_ids = json_school_ids - db_school_ids
+    
+    cursor.close()
+    
+    return missing_ids, len(json_school_ids), len(db_school_ids)
 
 def main():
     """Main execution function"""
@@ -165,17 +182,76 @@ def main():
         
         success_count = 0
         error_count = 0
+        failed_records = []
         
         # Process each school record
         for school_json in schools_data:
             school_data = map_json_to_db(school_json)
-            if insert_school(conn, school_data):
+            success, error_msg = insert_school(conn, school_data)
+            
+            if success:
                 success_count += 1
                 print(f"✓ Inserted school_id: {school_data['school_id']}")
             else:
                 error_count += 1
+                failed_records.append({
+                    'school_id': school_data['school_id'],
+                    'name': school_data.get('name', 'N/A'),
+                    'error': error_msg
+                })
+                print(f"✗ Failed school_id: {school_data['school_id']} - {error_msg}")
         
-        print(f"\nInsert complete: {success_count} successful, {error_count} errors")
+        print(f"\n{'='*70}")
+        print(f"Insert complete: {success_count} successful, {error_count} errors")
+        print(f"{'='*70}")
+        
+        # Verify which records are missing
+        print("\nVerifying database records...")
+        missing_ids, json_count, db_count = verify_missing_records(conn, schools_data)
+        
+        print(f"\n{'='*70}")
+        print(f"VERIFICATION RESULTS:")
+        print(f"{'='*70}")
+        print(f"Records in JSON file: {json_count}")
+        print(f"Records in database:  {db_count}")
+        print(f"Missing records:      {len(missing_ids)}")
+        print(f"{'='*70}")
+        
+        if missing_ids:
+            print(f"\n⚠ WARNING: {len(missing_ids)} records are missing from the database!")
+            print("\nMissing school_ids:")
+            
+            # Create detailed report of missing records
+            for school_json in schools_data:
+                school_id = str(school_json.get('school_id', ''))
+                if school_id in missing_ids:
+                    name = school_json.get('name_eng', 'N/A')
+                    print(f"  - school_id: {school_id}, name: {name}")
+            
+            # Save missing records to a file
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            missing_file = os.path.join(script_dir, 'missing_records.json')
+            
+            missing_records_data = [
+                school for school in schools_data 
+                if str(school.get('school_id', '')) in missing_ids
+            ]
+            
+            with open(missing_file, 'w', encoding='utf-8') as f:
+                json.dump(missing_records_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"\n✓ Missing records saved to: {missing_file}")
+        else:
+            print("\n✓ All records successfully imported!")
+        
+        if failed_records:
+            print(f"\n{'='*70}")
+            print(f"FAILED INSERTIONS SUMMARY:")
+            print(f"{'='*70}")
+            for record in failed_records:
+                print(f"school_id: {record['school_id']}")
+                print(f"  name: {record['name']}")
+                print(f"  error: {record['error']}\n")
         
         conn.close()
         
