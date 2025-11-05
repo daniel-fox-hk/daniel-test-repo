@@ -34,22 +34,6 @@ def load_data_from_file():
         return []
 
 
-def truncate_school_table(conn):
-    """Truncate the school table"""
-    cursor = conn.cursor()
-    try:
-        cursor.execute("TRUNCATE TABLE school CASCADE")
-        conn.commit()
-        print("✓ School table truncated successfully")
-        return True
-    except Exception as e:
-        conn.rollback()
-        print(f"✗ Error truncating school table: {e}")
-        return False
-    finally:
-        cursor.close()
-
-
 def map_json_to_db(school_json):
     """Map JSON fields to database columns"""
     # Clean phone number by removing leading quote if present
@@ -219,12 +203,6 @@ def main():
         # Connect to database
         conn = psycopg2.connect(**DB_CONFIG)
         print("\nConnected to database successfully")
-        
-        # Truncate the table
-        if not truncate_school_table(conn):
-            print("Failed to truncate table. Exiting.")
-            conn.close()
-            return
         
         success_count = 0
         error_count = 0
